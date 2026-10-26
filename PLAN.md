@@ -1,212 +1,242 @@
+
 # Implementation Plan — Stock Reservation API
 
-## 1. Problem Statement
+## 1. Objective
 
-Build a REST API using Java, Spring Boot, and PostgreSQL to manage product inventory and reservations. The API must support creating products, reserving stock, retrieving reservation details, confirming reservations, and cancelling reservations.
+Build a REST API using Java, Spring Boot, Spring Data JPA, and PostgreSQL to manage product inventory and reservations.
 
-Inventory must remain consistent when requests fail or multiple clients attempt to reserve the same stock concurrently.
+The API must support creating reservations for multiple products, confirming or cancelling reservations, validating stock availability, and maintaining consistent inventory during concurrent requests.
 
 ## 2. Acceptance Criteria
 
-- Products can be created and listed with total, reserved, and available stock.
-- A reservation can contain multiple products and quantities.
-- Only positive quantities and existing products can be reserved.
-- Insufficient stock rejects the entire reservation without partially reserving inventory.
-- Creating a reservation increases reserved stock without immediately reducing total stock.
-- Confirming an active reservation reduces both total and reserved stock.
-- Cancelling an active reservation releases reserved stock without reducing total stock.
-- A reservation cannot be confirmed or cancelled more than once.
-- Missing resources and invalid state transitions return appropriate HTTP status codes and readable JSON errors.
-- Concurrent requests cannot reserve more stock than is available.
-- Automated tests cover core business rules and concurrency behavior.
+- [x] List products and their stock availability.
+- [x] Create products.
+- [x] Create reservations containing multiple products and quantities.
+- [x] Validate that requested quantities are positive.
+- [x] Reject reservations when requested stock is unavailable.
+- [x] Prevent partial stock reservations when any requested product fails validation.
+- [x] Confirm reservations and deduct stock.
+- [x] Cancel reservations and release reserved stock.
+- [x] Prevent repeated confirmation or cancellation from modifying stock again.
+- [x] Reject operations involving nonexistent products or reservations.
+- [x] Prevent confirmation of cancelled reservations.
+- [x] Use database transactions and locking to protect inventory updates.
+- [x] Include automated tests for core reservation behavior and concurrency.
+- [x] Document setup, API endpoints, and test execution.
 
-## 3. Assumptions, Questions, and Scope
+## 3. Assumptions and Scope
 
-### Assumptions
-
-- PostgreSQL is the persistent source of truth for inventory.
-- Product IDs identify products in reservation requests; SKU values are unique.
-- A reservation is either ACTIVE, CONFIRMED, or CANCELLED.
-- Product quantities are positive integers.
+- Each product has a unique SKU.
+- Product stock is represented by total stock and reserved stock.
 - Available stock is calculated as `totalStock - reservedStock`.
-- Confirmation consumes stock that was previously reserved; cancellation releases the reservation.
+- A newly created reservation has status `ACTIVE`.
+- Confirmation changes the reservation status to `CONFIRMED`.
+- Cancellation changes the reservation status to `CANCELLED`.
+- Only active reservations can be confirmed or cancelled.
+- A reservation can contain multiple products.
+- Product IDs are used to identify products in reservation requests.
 
-### Questions and ambiguities
+### Out of Scope
 
-- Should reservations expire automatically, or remain active until confirmed or cancelled?
-- Should authentication, authorization, and user ownership be required?
-- Are there business-specific maximum quantities or reservation time limits?
-
-These questions should be clarified through the assignment's invitation channel if it is available. Until clarified, automatic expiry, authentication, and user ownership are outside the initial scope.
-
-### Intentionally excluded
-
+- User authentication and authorization.
 - Payment processing.
-- Automatic reservation expiry and background jobs.
-- Authentication and authorization.
-- Distributed inventory across multiple databases or services.
-- Frontend development and deployment infrastructure.
+- Reservation expiration and automatic cleanup.
+- Frontend development.
+- Distributed inventory management across multiple services.
+- Production deployment and monitoring.
 
-## 4. Proposed API
+## 4. API Design
 
-| Method | Endpoint | Purpose |
+### Products
+
+| Method | Endpoint | Description |
 |---|---|---|
-| GET | `/api/products` | List products and stock availability |
+| GET | `/api/products` | Retrieve products and stock availability |
 | POST | `/api/products` | Create a product |
-| POST | `/api/reservations` | Reserve quantities of multiple products |
+
+Product responses include:
+
+- `id`
+- `sku`
+- `name`
+- `totalStock`
+- `reservedStock`
+- `availableStock`
+
+### Reservations
+
+| Method | Endpoint | Description |
+|---|---|---|
+| POST | `/api/reservations` | Create a reservation |
 | GET | `/api/reservations/{id}` | Retrieve reservation details |
 | POST | `/api/reservations/{id}/confirm` | Confirm an active reservation |
 | POST | `/api/reservations/{id}/cancel` | Cancel an active reservation |
 
-### Representative requests
+### Example: Create a Reservation
 
-Create a product:
+Request:
+
+```http
+POST /api/reservations
+Content-Type: application/json
+```
 
 ```json
 {
-  "sku": "NOTE-001",
-  "name": "Notebook",
-  "totalStock": 10
+  "1": 3,
+  "2": 2
 }
 ```
 
-Create a reservation for two products:
+This requests 3 units of product ID `1` and 2 units of product ID `2`.
 
-```json
-{
-  "1": 2,
-  "2": 3
-}
-```
+The request body maps product IDs to requested quantities.
 
-The reservation request maps product IDs to requested quantities.
+### Sample Products
 
-A successful reservation should return its ID, status, timestamps, and reserved items. A failed request should return a JSON error message.
+The `src/main/resources/seed.sql` script contains the following sample products:
 
-### Expected error categories
+| Product ID | SKU | Name | Total Stock |
+|---|---|---|---:|
+| 1 | NOTE-001 | Notebook | 10 |
+| 2 | PEN-001 | Pen | 5 |
+| 3 | BAG-001 | Backpack | 2 |
 
-| Status | Meaning |
-|---|---|
-| 400 Bad Request | Malformed JSON, invalid quantity, or insufficient stock |
-| 404 Not Found | Requested product or reservation does not exist |
-| 409 Conflict | Invalid reservation state transition |
+These IDs correspond to the sample database state created by the seed script. Actual IDs may differ depending on the database contents.
 
-Exact response bodies should be verified against the implementation.
+The seed script must be executed manually; it is not automatically applied on application startup.
+
+### Reservation Lifecycle
+
+1. **Create:** Validate requested products, quantities, and available stock. Create an `ACTIVE` reservation and increase reserved stock.
+2. **Confirm:** Deduct the reserved quantities from total stock, decrease reserved stock, and mark the reservation `CONFIRMED`.
+3. **Cancel:** Decrease reserved stock without changing total stock and mark the reservation `CANCELLED`.
 
 ## 5. Database Design
 
-### `products`
+### Product
 
-- `id`: primary key.
-- `sku`: required, unique.
-- `name`: required.
-- `total_stock`: total remaining physical stock.
-- `reserved_stock`: stock currently held by active reservations.
+Stores product and inventory information.
 
-### `reservations`
+- `id` — primary key
+- `sku` — unique product identifier
+- `name` — product name
+- `total_stock` — total inventory quantity
+- `reserved_stock` — quantity currently reserved
 
-- `id`: primary key.
-- `status`: reservation state.
-- `created_at`: creation timestamp.
-- `updated_at`: last-update timestamp.
+### Reservation
 
-### `reservation_items`
+Stores reservation information.
 
-- `id`: primary key.
-- `reservation_id`: foreign key to `reservations.id`.
-- `product_id`: foreign key to `products.id`.
-- `quantity`: reserved quantity.
+- `id` — primary key
+- `status` — reservation status
+- `created_at` — creation timestamp
+- `updated_at` — last-update timestamp
 
-Each reservation can contain multiple items. Each item refers to one product.
+### Reservation Item
 
-```text
-products 1 -------- * reservation_items * -------- 1 reservations
-```
+Stores the products and quantities belonging to each reservation.
 
-Foreign keys maintain valid relationships. The SKU uniqueness constraint prevents duplicate product SKUs. Quantities must be positive, and stock values must remain consistent. Database constraints should reinforce these rules where practical.
+- `id` — primary key
+- `reservation_id` — reference to a reservation
+- `product_id` — reference to a product
+- `quantity` — reserved quantity
 
-## 6. Components and Request Flow
+A reservation can contain multiple reservation items, and each item references one product.
 
-- **Controllers:** expose REST endpoints, accept requests, and return HTTP responses.
-- **Services:** implement reservation rules and transaction boundaries.
-- **Repositories:** perform database access through Spring Data JPA.
-- **Entities:** represent products, reservations, and reservation items.
-- **DTOs:** shape reservation responses.
-- **Exception handler:** converts expected application and request errors into appropriate HTTP responses.
+## 6. Application Components
 
-Request flow:
+- **ProductController:** Handles product listing and creation.
+- **ReservationController:** Handles reservation creation, retrieval, confirmation, and cancellation.
+- **ReservationService:** Implements reservation business rules and transaction boundaries.
+- **ProductRepository:** Provides product persistence and pessimistic locking.
+- **ReservationRepository:** Provides reservation persistence and locking.
+- **ReservationItemRepository:** Retrieves reservation items.
+- **GlobalExceptionHandler:** Converts supported exceptions into HTTP error responses.
+- **ReservationResponse:** Represents reservation details returned by the API.
 
-```text
-HTTP request
-    |
-Controller
-    |
-Service (@Transactional)
-    |
-Repository / JPA
-    |
-PostgreSQL
-    |
-Response DTO
-    |
-HTTP response
-```
+Spring Data JPA and Hibernate handle database persistence.
 
-## 7. Transaction Safety and Concurrency
+## 7. Transaction and Concurrency Strategy
 
-Reservation creation must execute as one database transaction. If any requested product is invalid or has insufficient stock, all changes must roll back.
+Reservation operations use database transactions to keep related inventory changes atomic.
 
-Product rows should be locked while checking availability and updating reserved stock. When multiple products are involved, acquire locks in a consistent product-ID order to reduce deadlock risk.
+- Product rows are locked during stock-sensitive operations.
+- Products are locked in ascending ID order to reduce deadlock risk when multiple products are involved.
+- Available stock is checked while holding the relevant product lock.
+- Reservation creation fails without retaining partial stock changes if a requested product cannot be reserved.
+- Confirmation and cancellation require the reservation to remain `ACTIVE`.
+- Reservation rows are locked when changing reservation state.
 
-Confirmation and cancellation must lock the reservation row and verify that its status is ACTIVE. Product stock updates and the status transition must commit together.
+These measures protect the inventory updates exercised by the implementation and its tests. Broader production concurrency behavior would require testing under the intended deployment workload.
 
-Without locking, two requests could read the same available quantity and both reserve it, causing overselling. Pessimistic row locking serializes competing updates to the same product; the later request checks the stock after the earlier transaction completes.
+## 8. Implementation Status
 
-## 8. Implementation Sequence
+- [x] Set up the Spring Boot project and dependencies.
+- [x] Configure PostgreSQL and JPA.
+- [x] Implement the product entity and repository.
+- [x] Implement the reservation and reservation-item entities.
+- [x] Implement product endpoints.
+- [x] Implement reservation creation and stock validation.
+- [x] Implement reservation confirmation and cancellation.
+- [x] Add transactional behavior and database locking.
+- [x] Implement exception handling.
+- [x] Add automated tests.
+- [x] Verify selected API success and error scenarios manually.
+- [x] Prepare project documentation.
 
-1. Set up the Spring Boot project, dependencies, and PostgreSQL connection.
-2. Define product, reservation, and reservation-item entities and repositories.
-3. Implement product creation and listing.
-4. Implement transactional reservation creation and availability checks.
-5. Implement reservation retrieval, confirmation, and cancellation.
-6. Add request validation and consistent exception handling.
-7. Add automated tests for business rules, failure cases, and concurrency.
-8. Document setup, API usage, design decisions, and test commands.
+## 9. Test Plan and Verification
 
-## 9. Test Plan and Priorities
+### Automated Tests
 
-### Priority 1 — Core correctness
+The automated test suite covers:
 
-- Application context starts successfully.
-- Product creation and listing work.
-- Valid reservation updates reserved stock.
-- Insufficient stock rejects the entire multi-product reservation.
-- Confirmation consumes stock and clears the reservation hold.
-- Cancellation releases reserved stock.
-- Repeated confirmation or cancellation is rejected.
+- [x] Application context startup.
+- [x] Reservation creation and reserved-stock updates.
+- [x] Insufficient-stock rejection.
+- [x] Atomic failure for multi-product reservations.
+- [x] Reservation confirmation and stock deduction.
+- [x] Reservation cancellation and stock release.
+- [x] Repeated cancellation without releasing stock twice.
+- [x] Repeated confirmation without deducting stock twice.
+- [x] Requests involving nonexistent products.
+- [x] Zero and negative quantities.
+- [x] Confirmation of a cancelled reservation.
+- [x] Confirmation of a nonexistent reservation.
+- [x] Retrieval of reservations containing multiple products.
+- [x] Concurrent reservation behavior.
 
-### Priority 2 — Failure handling
+### Manual Verification
 
-- Empty requests, malformed JSON, and non-positive quantities are rejected.
-- Missing products and reservations return appropriate errors.
-- Confirming or cancelling a missing reservation returns 404.
-- Invalid state transitions return 409.
-- Failed operations leave inventory unchanged.
+Selected API scenarios were checked manually:
 
-### Priority 3 — Concurrency and regression
+- [x] Product listing.
+- [x] Creating, confirming, and cancelling reservations.
+- [x] Rejecting insufficient-stock requests without partial reservation.
+- [x] Rejecting malformed JSON.
+- [x] Returning an error for a nonexistent reservation.
+- [x] Rejecting invalid reservation state transitions.
 
-- Competing reservations cannot oversell inventory.
-- Run the complete automated test suite after implementation changes.
-- Verify the documented setup and API examples.
+### Additional Verification
 
-If time is limited, prioritize atomic inventory updates, correct reservation state transitions, concurrency protection, and tests for insufficient stock and cancellation before optional features.
+- [ ] Verify database state persists across an application restart.
+- [ ] Automate additional HTTP-level error scenarios if required.
+
+The unchecked items are additional verification work and should not be treated as completed.
 
 ## 10. Documentation and Delivery
 
-- Maintain `README.md` with setup instructions, database configuration, endpoint examples, and test commands.
-- Maintain `PLAN.md` as the implementation plan.
-- Document AI assistance and the extent of its use in `AI_USAGE.md`.
-- Run the full test suite before submission.
-- Commit the plan before any subsequent implementation changes.
+- [x] `README.md` — project overview, configuration, endpoints, and usage.
+- [x] `PLAN.md` — implementation plan, design, and verification status.
+- [x] `HELP.md` — setup help and technical references.
+- [x] `AI_USAGE.md` — disclosure of AI assistance.
+- [x] Automated test suite.
 
-**Planning note:** This document records the intended design and current understanding. Because implementation work preceded this Git initialization, the repository cannot establish that this plan was committed before the original implementation.
+Before submission:
+
+- [ ] Review the final Git changes.
+- [ ] Confirm all intended files are committed.
+
+## Planning Note
+
+The implementation work began before Git was initialized. Therefore, the repository history cannot establish that this plan was committed before implementation began. The plan documents the intended scope, design, and current verification status.
